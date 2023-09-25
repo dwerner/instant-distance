@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use aligned_vec::avec;
 use bencher::{benchmark_group, benchmark_main, Bencher};
 
@@ -18,9 +20,7 @@ fn distance(bench: &mut Bencher) {
 
 fn build(bench: &mut Bencher) {
     let mut rng = StdRng::seed_from_u64(SEED);
-    let points = (0..1024)
-        .map(|_| vec![rng.gen(); 304])
-        .collect::<Vec<_>>();
+    let points = (0..1024).map(|_| vec![rng.gen(); 304]).collect::<Vec<_>>();
 
     bench.iter(|| {
         Builder::default()
@@ -31,9 +31,7 @@ fn build(bench: &mut Bencher) {
 
 fn query(bench: &mut Bencher) {
     let mut rng = StdRng::seed_from_u64(SEED);
-    let points = (0..1024)
-        .map(|_| vec![rng.gen(); 304])
-        .collect::<Vec<_>>();
+    let points = (0..1024).map(|_| vec![rng.gen(); 304]).collect::<Vec<_>>();
     let (hnsw, _) = Builder::default()
         .seed(SEED)
         .build_hnsw::<Vec<f32>, [f32], EuclidMetric, PointStorage>(points);
