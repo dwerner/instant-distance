@@ -15,7 +15,6 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use serde::{Deserialize, Serialize};
 
 pub mod contiguous;
-mod contiguous_types;
 
 mod types;
 pub use types::PointId;

@@ -15,8 +15,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::contiguous_types::{Meta, ZeroNode, INVALID};
-use crate::types::{Candidate, Layer, LayerId, Visited};
+use crate::types::{BorrowedZeroNode, Candidate, Layer, LayerId, Visited};
+use crate::types::{Meta, ZeroNode, INVALID};
 use crate::{Builder, Heuristic, Point, PointId};
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -232,10 +232,10 @@ where
 /// for the new node's neighbors if necessary before appending the new node to the layer.
 fn insert<'a, P: Point>(
     new: PointId,
-    mut node: parking_lot::RwLockWriteGuard<ZeroNode<'a>>,
+    mut node: parking_lot::RwLockWriteGuard<BorrowedZeroNode<'a>>,
     insertion: &mut Search,
     search: &mut Search,
-    layer: &'a [RwLock<ZeroNode<'a>>],
+    layer: &'a [RwLock<BorrowedZeroNode<'a>>],
     points: &[P],
     heuristic: &Option<Heuristic>,
 ) {
