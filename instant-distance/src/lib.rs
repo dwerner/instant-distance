@@ -77,6 +77,16 @@ impl Builder {
         self
     }
 
+    /// TEMPORARY: Build an `Hnsw` with the given sets of points and values
+    /// TODO: Refactor this to return an HnswMap
+    pub fn build_contiguous<P: Point, V: Clone>(
+        self,
+        points: Vec<P>,
+        todo_values: Vec<V>,
+    ) -> (contiguous::Hnsw<P>, Vec<PointId>) {
+        contiguous::Hnsw::new(points, self)
+    }
+
     /// Build an `HnswMap` with the given sets of points and values
     pub fn build<P: Point, V: Clone>(self, points: Vec<P>, values: Vec<V>) -> HnswMap<P, V> {
         HnswMap::new(points, values, self)

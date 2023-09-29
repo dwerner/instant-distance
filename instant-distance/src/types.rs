@@ -164,7 +164,7 @@ impl<T> NearestIter<T>
 where
     T: Deref<Target = [PointId]>,
 {
-    fn new(node: T) -> Self {
+    pub(crate) fn new(node: T) -> Self {
         Self { node, cur: 0 }
     }
 }

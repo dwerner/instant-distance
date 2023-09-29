@@ -1,8 +1,6 @@
 use std::cmp::max;
-use std::hash::Hash;
 use std::ops::{Deref, Index, Range};
 
-use ordered_float::OrderedFloat;
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
@@ -10,7 +8,8 @@ use rayon::slice::ParallelSliceMut;
 use serde::{Deserialize, Serialize};
 
 use crate::contiguous::{Hnsw, M};
-use crate::Point;
+use crate::types::{Layer, LayerId, NearestIter};
+use crate::PointId;
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Default)]
@@ -153,54 +152,6 @@ impl<'a> Layer for LayerSlice<'a> {
     }
 }
 
-pub(crate) struct Visited {
-    store: Vec<u8>,
-    generation: u8,
-}
-
-impl Visited {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            store: vec![0; capacity],
-            generation: 1,
-        }
-    }
-
-    pub(crate) fn reserve_capacity(&mut self, capacity: usize) {
-        if self.store.len() != capacity {
-            self.store.resize(capacity, self.generation - 1);
-        }
-    }
-
-    pub(crate) fn insert(&mut self, pid: PointId) -> bool {
-        let slot = &mut self.store[pid.0 as usize];
-        if *slot != self.generation {
-            *slot = self.generation;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn extend(&mut self, iter: impl Iterator<Item = PointId>) {
-        for pid in iter {
-            self.insert(pid);
-        }
-    }
-
-    pub(crate) fn clear(&mut self) {
-        if self.generation < 249 {
-            self.generation += 1;
-            return;
-        }
-
-        let len = self.store.len();
-        self.store.clear();
-        self.store.resize(len, 0);
-        self.generation = 1;
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct ZeroNode<'a>(pub(crate) &'a mut [PointId]);
 
@@ -256,108 +207,11 @@ impl<'a> Layer for &'a [RwLock<ZeroNode<'a>>] {
     }
 }
 
-pub(crate) trait Layer {
-    type Slice: Deref<Target = [PointId]>;
-    fn nearest_iter(&self, pid: PointId) -> NearestIter<Self::Slice>;
-}
-
-pub(crate) struct NearestIter<T> {
-    node: T,
-    cur: usize,
-}
-
-impl<T> NearestIter<T>
-where
-    T: Deref<Target = [PointId]>,
-{
-    fn new(node: T) -> Self {
-        Self { node, cur: 0 }
-    }
-}
-
-impl<T> Iterator for NearestIter<T>
-where
-    T: Deref<Target = [PointId]>,
-{
-    type Item = PointId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.cur >= self.node.len() {
-            return None;
-        }
-
-        let item = self.node[self.cur];
-        if !item.is_valid() {
-            self.cur = self.node.len();
-            return None;
-        }
-
-        self.cur += 1;
-        Some(item)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct LayerId(pub usize);
-
-impl LayerId {
-    pub(crate) fn is_zero(&self) -> bool {
-        self.0 == 0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Candidate {
-    pub(crate) distance: OrderedFloat<f32>,
-    /// The identifier for the neighboring point
-    pub pid: PointId,
-}
-
-impl Candidate {
-    /// Distance to the neighboring point
-    pub fn distance(&self) -> f32 {
-        *self.distance
-    }
-}
-
-/// References a `Point` in the `Hnsw`
-///
-/// This can be used to index into the `Hnsw` to refer to the `Point` data.
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PointId(pub(crate) u32);
-
-impl PointId {
-    /// Whether this value represents a valid point
-    pub fn is_valid(self) -> bool {
-        self.0 != u32::MAX
-    }
-
-    /// Return the identifier value
-    pub fn into_inner(self) -> u32 {
-        self.0
-    }
-}
-
-impl Default for PointId {
-    fn default() -> Self {
-        INVALID
-    }
-}
-
 impl<P> Index<PointId> for Hnsw<P> {
     type Output = P;
 
     fn index(&self, index: PointId) -> &Self::Output {
         &self.points[index.0 as usize]
-    }
-}
-
-impl<P: Point> Index<PointId> for [P] {
-    type Output = P;
-
-    fn index(&self, index: PointId) -> &Self::Output {
-        &self[index.0 as usize]
     }
 }
 

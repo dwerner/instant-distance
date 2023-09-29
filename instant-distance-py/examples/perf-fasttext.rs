@@ -102,10 +102,10 @@ fn contiguous(
 ) -> Result<(), anyhow::Error> {
     let bar = indicatif::ProgressBar::new(points.len() as u64);
     let start = Instant::now();
-    let (hnsw, _ids) = contiguous::Builder::default()
+    let (hnsw, _ids) = Builder::default()
         .seed(seed)
         .progress(bar)
-        .build::<FloatArray>(points);
+        .build_contiguous::<FloatArray, _>(points, vec![0]);
     println!("contiguous indexing took {:?}", start.elapsed());
 
     if wait {

@@ -15,112 +15,9 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-pub use crate::contiguous_types::PointId;
-use crate::contiguous_types::{Candidate, Layer, LayerId, Meta, Visited, ZeroNode, INVALID};
-use crate::Point;
-
-/// Parameters for building the `Hnsw`
-pub struct Builder {
-    ef_search: usize,
-    ef_construction: usize,
-    heuristic: Option<Heuristic>,
-    ml: f32,
-    seed: u64,
-    #[cfg(feature = "indicatif")]
-    progress: Option<ProgressBar>,
-}
-
-impl Builder {
-    /// Set the `efConstruction` parameter from the paper
-    pub fn ef_construction(mut self, ef_construction: usize) -> Self {
-        self.ef_construction = ef_construction;
-        self
-    }
-
-    /// Set the `ef` parameter from the paper
-    ///
-    /// If the `efConstruction` parameter is not already set, it will be set
-    /// to the same value as `ef` by default.
-    pub fn ef_search(mut self, ef: usize) -> Self {
-        self.ef_search = ef;
-        self
-    }
-
-    pub fn select_heuristic(mut self, params: Option<Heuristic>) -> Self {
-        self.heuristic = params;
-        self
-    }
-
-    /// Set the `mL` parameter from the paper
-    ///
-    /// If the `mL` parameter is not already set, it defaults to `1.0 / ln(M)`.
-    pub fn ml(mut self, ml: f32) -> Self {
-        self.ml = ml;
-        self
-    }
-
-    /// Set the seed value for the random number generator used to generate a layer for each point
-    ///
-    /// If this value is left unset, a seed is generated from entropy (via `getrandom()`).
-    pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self
-    }
-
-    /// A `ProgressBar` to track `Hnsw` construction progress
-    #[cfg(feature = "indicatif")]
-    pub fn progress(mut self, bar: ProgressBar) -> Self {
-        self.progress = Some(bar);
-        self
-    }
-
-    /// Build the `Hnsw` with the given set of points
-    pub fn build<P: Point>(self, points: Vec<P>) -> (Hnsw<P>, Vec<PointId>) {
-        Hnsw::new(points, self)
-    }
-
-    #[doc(hidden)]
-    pub fn into_parts(self) -> (usize, usize, f32, u64) {
-        let Self {
-            ef_search,
-            ef_construction,
-            heuristic: _,
-            ml,
-            seed,
-            ..
-        } = self;
-        (ef_search, ef_construction, ml, seed)
-    }
-}
-
-impl Default for Builder {
-    fn default() -> Self {
-        Self {
-            ef_search: 100,
-            ef_construction: 100,
-            heuristic: Some(Heuristic::default()),
-            ml: 1.0 / (M as f32).ln(),
-            seed: rand::random(),
-            #[cfg(feature = "indicatif")]
-            progress: None,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct Heuristic {
-    pub extend_candidates: bool,
-    pub keep_pruned: bool,
-}
-
-impl Default for Heuristic {
-    fn default() -> Self {
-        Heuristic {
-            extend_candidates: false,
-            keep_pruned: true,
-        }
-    }
-}
+use crate::contiguous_types::{Meta, ZeroNode, INVALID};
+use crate::types::{Candidate, Layer, LayerId, Visited};
+use crate::{Builder, Heuristic, Point, PointId};
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct Hnsw<P> {
@@ -138,7 +35,7 @@ where
         Builder::default()
     }
 
-    fn new(points: Vec<P>, builder: Builder) -> (Self, Vec<PointId>) {
+    pub(crate) fn new(points: Vec<P>, builder: Builder) -> (Self, Vec<PointId>) {
         let ef_search = builder.ef_search;
         let ef_construction = builder.ef_construction;
         let ml = builder.ml;
