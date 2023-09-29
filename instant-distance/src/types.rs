@@ -8,8 +8,6 @@ use rayon::prelude::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "serde-big-array")]
-use serde_big_array::BigArray;
 
 use crate::{Hnsw, Point, M};
 
@@ -61,98 +59,6 @@ impl Visited {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct UpperNode([PointId; M]);
-
-impl UpperNode {
-    pub(crate) fn from_zero(node: &ZeroNode) -> Self {
-        let mut nearest = [INVALID; M];
-        nearest.copy_from_slice(&node.0[..M]);
-        Self(nearest)
-    }
-}
-
-impl<'a> Layer for &'a [UpperNode] {
-    type Slice = &'a [PointId];
-
-    fn nearest_iter(&self, pid: PointId) -> NearestIter<Self::Slice> {
-        NearestIter::new(&self[pid.0 as usize].0)
-    }
-}
-
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ZeroNode(
-    #[cfg_attr(feature = "serde", serde(with = "BigArray"))] pub(crate) [PointId; M * 2],
-);
-
-impl ZeroNode {
-    pub(crate) fn rewrite(&mut self, mut iter: impl Iterator<Item = PointId>) {
-        for slot in self.0.iter_mut() {
-            if let Some(pid) = iter.next() {
-                *slot = pid;
-            } else if *slot != INVALID {
-                *slot = INVALID;
-            } else {
-                break;
-            }
-        }
-    }
-
-    pub(crate) fn insert(&mut self, idx: usize, pid: PointId) {
-        // It might be possible for all the neighbor's current neighbors to be closer to our
-        // neighbor than to the new node, in which case we skip insertion of our new node's ID.
-        if idx >= self.0.len() {
-            return;
-        }
-
-        if self.0[idx].is_valid() {
-            let end = (M * 2) - 1;
-            self.0.copy_within(idx..end, idx + 1);
-        }
-
-        self.0[idx] = pid;
-    }
-
-    pub(crate) fn set(&mut self, idx: usize, pid: PointId) {
-        self.0[idx] = pid;
-    }
-}
-
-impl Default for ZeroNode {
-    fn default() -> ZeroNode {
-        ZeroNode([INVALID; M * 2])
-    }
-}
-
-impl Deref for ZeroNode {
-    type Target = [PointId];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'a> Layer for &'a [ZeroNode] {
-    type Slice = &'a [PointId];
-
-    fn nearest_iter(&self, pid: PointId) -> NearestIter<Self::Slice> {
-        NearestIter::new(&self[pid.0 as usize])
-    }
-}
-
-impl<'a> Layer for &'a [RwLock<ZeroNode>] {
-    type Slice = MappedRwLockReadGuard<'a, [PointId]>;
-
-    fn nearest_iter(&self, pid: PointId) -> NearestIter<Self::Slice> {
-        NearestIter::new(RwLockReadGuard::map(
-            self[pid.0 as usize].read(),
-            Deref::deref,
-        ))
-    }
-}
-
 pub(crate) trait Layer {
     type Slice: Deref<Target = [PointId]>;
     fn nearest_iter(&self, pid: PointId) -> NearestIter<Self::Slice>;
@@ -198,10 +104,6 @@ where
 pub(crate) struct LayerId(pub usize);
 
 impl LayerId {
-    pub(crate) fn descend(&self) -> impl Iterator<Item = LayerId> {
-        DescendingLayerIter { next: Some(self.0) }
-    }
-
     pub(crate) fn is_zero(&self) -> bool {
         self.0 == 0
     }
@@ -355,7 +257,7 @@ pub(crate) struct LayerSliceMut<'a> {
 }
 
 impl<'a> LayerSliceMut<'a> {
-    pub(crate) fn copy_from_zero(&mut self, zero: &[RwLock<BorrowedZeroNode<'_>>]) {
+    pub(crate) fn copy_from_zero(&mut self, zero: &[RwLock<ZeroNode<'_>>]) {
         let stride = self.stride;
         self.neighbors
             .par_chunks_mut(stride)
@@ -365,10 +267,10 @@ impl<'a> LayerSliceMut<'a> {
             });
     }
 
-    pub(crate) fn zero_nodes(&mut self) -> Vec<RwLock<BorrowedZeroNode<'_>>> {
+    pub(crate) fn zero_nodes(&mut self) -> Vec<RwLock<ZeroNode<'_>>> {
         self.neighbors
             .chunks_exact_mut(self.stride)
-            .map(|n| RwLock::new(BorrowedZeroNode(n)))
+            .map(|n| RwLock::new(ZeroNode(n)))
             .collect::<Vec<_>>()
     }
 
@@ -397,9 +299,9 @@ impl<'a> Layer for LayerSlice<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct BorrowedZeroNode<'a>(pub(crate) &'a mut [PointId]);
+pub(crate) struct ZeroNode<'a>(pub(crate) &'a mut [PointId]);
 
-impl<'a> BorrowedZeroNode<'a> {
+impl<'a> ZeroNode<'a> {
     pub(crate) fn rewrite(&mut self, mut iter: impl Iterator<Item = PointId>) {
         for slot in self.0.iter_mut() {
             if let Some(pid) = iter.next() {
@@ -432,7 +334,7 @@ impl<'a> BorrowedZeroNode<'a> {
     }
 }
 
-impl<'a> Deref for BorrowedZeroNode<'a> {
+impl<'a> Deref for ZeroNode<'a> {
     type Target = [PointId];
 
     fn deref(&self) -> &Self::Target {
@@ -440,7 +342,7 @@ impl<'a> Deref for BorrowedZeroNode<'a> {
     }
 }
 
-impl<'a> Layer for &'a [RwLock<BorrowedZeroNode<'a>>] {
+impl<'a> Layer for &'a [RwLock<ZeroNode<'a>>] {
     type Slice = MappedRwLockReadGuard<'a, [PointId]>;
 
     fn nearest_iter(&self, pid: PointId) -> NearestIter<Self::Slice> {
@@ -481,16 +383,8 @@ impl<P: Point> Index<PointId> for [P] {
     }
 }
 
-impl<'a> Index<PointId> for [RwLock<BorrowedZeroNode<'a>>] {
-    type Output = RwLock<BorrowedZeroNode<'a>>;
-
-    fn index(&self, index: PointId) -> &Self::Output {
-        &self[index.0 as usize]
-    }
-}
-
-impl Index<PointId> for [RwLock<ZeroNode>] {
-    type Output = RwLock<ZeroNode>;
+impl<'a> Index<PointId> for [RwLock<ZeroNode<'a>>] {
+    type Output = RwLock<ZeroNode<'a>>;
 
     fn index(&self, index: PointId) -> &Self::Output {
         &self[index.0 as usize]

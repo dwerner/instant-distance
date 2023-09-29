@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use instant_distance::{contiguous, Builder, Search};
+use instant_distance::{Builder, Search};
 use instant_distance_py::FloatArray;
 use rand::{rngs::ThreadRng, Rng};
 use structopt::StructOpt;
@@ -36,9 +36,6 @@ struct Opt {
     #[structopt(short = "n", default_value = "1000")]
     num_queries: usize,
 
-    #[structopt(short = "c")]
-    contiguous: bool,
-
     #[structopt(short = "s")]
     wait: bool,
 }
@@ -47,65 +44,24 @@ fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::from_args();
     let (words, points) = load_points(&opt.path, opt.word_count)?;
     println!("{} points loaded, building hnsw...", points.len());
-
     let seed = ThreadRng::default().gen();
-
-    if opt.contiguous {
-        contiguous(opt.wait, seed, opt.num_queries, points.clone())?;
-    } else {
-        original(opt.wait, seed, opt.num_queries, words, points)?;
-    }
-
+    index_and_query(opt.wait, seed, opt.num_queries, points, words)?;
     Ok(())
 }
 
-fn original(
+fn index_and_query(
     wait: bool,
     seed: u64,
     num_queries: usize,
+    points: Vec<FloatArray>,
     words: Vec<String>,
-    points: Vec<FloatArray>,
 ) -> Result<(), anyhow::Error> {
     let bar = indicatif::ProgressBar::new(points.len() as u64);
     let start = Instant::now();
-    let map = Builder::default()
+    let hnsw = Builder::default()
         .seed(seed)
         .progress(bar)
-        .build::<FloatArray, String>(points, words);
-    println!("original indexing took {:?}", start.elapsed());
-
-    if wait {
-        println!("sleeping for 15s");
-        sleep(Duration::from_millis(15000));
-    }
-
-    let mut search = Search::default();
-    let point = FloatArray([0.0; 300]);
-    for _ in 0..20 {
-        let query_start = Instant::now();
-        for _ in 0..num_queries {
-            let _closest_point = map.search(&point, &mut search).next().unwrap();
-            tracy_full::frame!("original search");
-        }
-        tracy_full::frame!("search group");
-        println!("{} queries took {:?}", num_queries, query_start.elapsed());
-    }
-    tracy_full::frame!();
-    Ok(())
-}
-
-fn contiguous(
-    wait: bool,
-    seed: u64,
-    num_queries: usize,
-    points: Vec<FloatArray>,
-) -> Result<(), anyhow::Error> {
-    let bar = indicatif::ProgressBar::new(points.len() as u64);
-    let start = Instant::now();
-    let (hnsw, _ids) = Builder::default()
-        .seed(seed)
-        .progress(bar)
-        .build_contiguous::<FloatArray, _>(points, vec![0]);
+        .build::<FloatArray, _>(points, words);
     println!("contiguous indexing took {:?}", start.elapsed());
 
     if wait {
@@ -113,7 +69,7 @@ fn contiguous(
         sleep(Duration::from_millis(15000));
     }
 
-    let mut search = contiguous::Search::default();
+    let mut search = Search::default();
     let point = FloatArray([0.0; 300]);
     for _ in 0..20 {
         let query_start = Instant::now();
