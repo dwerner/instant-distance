@@ -9,31 +9,36 @@ use instant_distance::{Builder, Point as _, Search};
 #[test]
 #[allow(clippy::float_cmp, clippy::approx_constant)]
 fn map() {
-    let points = (0..5)
-        .map(|i| Point(i as f32, i as f32))
-        .collect::<Vec<_>>();
-    let values = vec!["zero", "one", "two", "three", "four"];
+    for _ in 0..10 {
+        let points = (0..5)
+            .map(|i| Point(i as f32, i as f32))
+            .collect::<Vec<_>>();
+        let values = vec!["zero", "one", "two", "three", "four"];
 
-    let seed = ThreadRng::default().gen::<u64>();
-    println!("map (seed = {seed})");
-    let map = Builder::default().seed(seed).build(points, values);
-    let mut search = Search::default();
+        let seed = ThreadRng::default().gen::<u64>();
+        println!("map (seed = {seed})");
+        let map = Builder::default().seed(seed).build(points, values);
+        let mut search = Search::default();
 
-    for (i, item) in map.search(&Point(2.0, 2.0), &mut search).enumerate() {
-        match i {
-            0 => {
-                assert_eq!(item.distance, 0.0);
-                assert_eq!(item.value, &"two");
+        let search_results = map.search(&Point(2.0, 2.0), &mut search);
+        assert_eq!(search_results.len(), 5);
+
+        for (i, item) in search_results.enumerate() {
+            match i {
+                0 => {
+                    assert_eq!(item.distance, 0.0);
+                    assert_eq!(item.value, &"two");
+                }
+                1 | 2 => {
+                    assert_eq!(item.distance, 1.4142135);
+                    assert!(item.value == &"one" || item.value == &"three");
+                }
+                3 | 4 => {
+                    assert_eq!(item.distance, 2.828427);
+                    assert!(item.value == &"zero" || item.value == &"four");
+                }
+                _ => unreachable!(),
             }
-            1 | 2 => {
-                assert_eq!(item.distance, 1.4142135);
-                assert!(item.value == &"one" || item.value == &"three");
-            }
-            3 | 4 => {
-                assert_eq!(item.distance, 2.828427);
-                assert!(item.value == &"zero" || item.value == &"four");
-            }
-            _ => unreachable!(),
         }
     }
 }
