@@ -1,19 +1,21 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::ops::Range;
 #[cfg(feature = "indicatif")]
 use std::sync::atomic::{self, AtomicUsize};
 
+use contiguous::ContiguousStorage;
 #[cfg(feature = "indicatif")]
 use indicatif::ProgressBar;
 use ordered_float::OrderedFloat;
 use parking_lot::{Mutex, RwLock};
-use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+mod contiguous;
+pub use contiguous::{PointDataSource, PointRef, Storage};
 mod types;
 pub use types::PointId;
 use types::{Candidate, Layer, LayerId, LayerSliceMut, Visited, ZeroNode};
@@ -77,12 +79,16 @@ impl Builder {
     }
 
     /// Build an `HnswMap` with the given sets of points and values
-    pub fn build<P: Point, V: Clone>(self, points: Vec<P>, values: Vec<V>) -> HnswMap<P, V> {
+    pub fn build<P: PointDataSource, V: Clone>(
+        self,
+        points: &[P],
+        values: Vec<V>,
+    ) -> HnswMap<P, V> {
         HnswMap::new(points, values, self)
     }
 
     /// Build the `Hnsw` with the given set of points
-    pub fn build_hnsw<P: Point>(self, points: Vec<P>) -> (Hnsw<P>, Vec<PointId>) {
+    pub fn build_hnsw<P: PointDataSource>(self, points: &[P]) -> (Hnsw<P>, Vec<PointId>) {
         Hnsw::new(points, self)
     }
 
@@ -130,17 +136,20 @@ impl Default for Heuristic {
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-pub struct HnswMap<P, V> {
-    hnsw: Hnsw<P>,
+pub struct HnswMap<P, V>
+where
+    P: PointDataSource,
+{
+    pub hnsw: Hnsw<P>,
     pub values: Vec<V>,
 }
 
 impl<P, V> HnswMap<P, V>
 where
-    P: Point,
+    P: PointDataSource,
     V: Clone,
 {
-    fn new(points: Vec<P>, values: Vec<V>, builder: Builder) -> Self {
+    fn new(points: &[P], values: Vec<V>, builder: Builder) -> Self {
         let (hnsw, ids) = Hnsw::new(points, builder);
 
         let mut sorted = ids.into_iter().enumerate().collect::<Vec<_>>();
@@ -155,7 +164,7 @@ where
 
     pub fn search<'a>(
         &'a self,
-        point: &P,
+        point: &PointRef<'a>,
         search: &'a mut Search,
     ) -> impl Iterator<Item = MapItem<'a, P, V>> + ExactSizeIterator + 'a {
         self.hnsw
@@ -164,7 +173,7 @@ where
     }
 
     /// Iterate over the keys and values in this index
-    pub fn iter(&self) -> impl Iterator<Item = (PointId, &P)> {
+    pub fn iter(&self) -> impl Iterator<Item = (PointId, PointRef<'_>)> {
         self.hnsw.iter()
     }
 
@@ -174,46 +183,56 @@ where
     }
 }
 
-pub struct MapItem<'a, P, V> {
+pub struct MapItem<'a, P, V>
+where
+    P: PointDataSource,
+{
     pub distance: f32,
     pub pid: PointId,
-    pub point: &'a P,
+    pub point: PointRef<'a>,
     pub value: &'a V,
+    _marker: PhantomData<&'a P>,
 }
 
-impl<'a, P, V> MapItem<'a, P, V> {
+impl<'a, P, V> MapItem<'a, P, V>
+where
+    P: PointDataSource,
+{
     fn from(item: Item<'a, P>, map: &'a HnswMap<P, V>) -> Self {
         MapItem {
             distance: item.distance,
             pid: item.pid,
             point: item.point,
             value: &map.values[item.pid.0 as usize],
+            _marker: PhantomData,
         }
     }
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-pub struct Hnsw<P> {
+pub struct Hnsw<P>
+where
+    P: PointDataSource,
+{
     ef_search: usize,
-    pub(crate) points: Vec<P>,
+    pub storage: ContiguousStorage<P>,
     meta: Meta,
     neighbors: Vec<PointId>,
 }
 
 impl<P> Hnsw<P>
 where
-    P: Point,
+    P: PointDataSource,
 {
     pub fn builder() -> Builder {
         Builder::default()
     }
 
-    pub(crate) fn new(points: Vec<P>, builder: Builder) -> (Self, Vec<PointId>) {
+    pub(crate) fn new(points: &[P], builder: Builder) -> (Self, Vec<PointId>) {
         let ef_search = builder.ef_search;
         let ef_construction = builder.ef_construction;
         let ml = builder.ml;
         let heuristic = builder.heuristic;
-        let mut rng = SmallRng::seed_from_u64(builder.seed);
 
         #[cfg(feature = "indicatif")]
         let progress = builder.progress;
@@ -227,9 +246,9 @@ where
             return (
                 Self {
                     ef_search,
-                    points: Vec::new(),
                     neighbors: Vec::new(),
                     meta: Meta::default(),
+                    storage: ContiguousStorage::empty(),
                 },
                 Vec::new(),
             );
@@ -241,29 +260,7 @@ where
         // construction. This allows us to copy higher layers to lower layers as construction
         // progresses, while preserving randomness in each point's layer and insertion order.
 
-        assert!(points.len() < u32::MAX as usize);
-        let mut shuffled = (0..points.len())
-            .map(|i| (PointId(rng.gen_range(0..points.len() as u32)), i))
-            .collect::<Vec<_>>();
-        shuffled.sort_unstable();
-
-        let mut new_points = Vec::with_capacity(points.len());
-        let mut new_nodes = Vec::with_capacity(points.len());
-        let mut out = vec![INVALID; points.len()];
-        let mut at_layer = meta.next_lower(None).unwrap();
-        for (i, (_, idx)) in shuffled.into_iter().enumerate() {
-            let pid = PointId(new_nodes.len() as u32);
-            if i == at_layer.1 {
-                at_layer = meta.next_lower(Some(at_layer.0)).unwrap();
-            }
-
-            new_points.push(points[idx].clone());
-            new_nodes.push((at_layer.0, pid));
-            out[idx] = pid;
-        }
-        let (points, nodes) = (new_points, new_nodes);
-        debug_assert_eq!(nodes.first().unwrap().0, LayerId(meta.len() - 1));
-        debug_assert_eq!(nodes.last().unwrap().0, LayerId(0));
+        let (storage, layer_assignments, out) = ContiguousStorage::<P>::new(points, &meta, builder);
 
         // Insert the first point so that we have an enter point to start searches with.
 
@@ -277,7 +274,7 @@ where
             zero: zero.as_slice(),
             upper,
             pool: SearchPool::new(points.len()),
-            points: &points,
+            storage: &storage,
             heuristic,
             ef_construction,
             #[cfg(feature = "indicatif")]
@@ -301,11 +298,13 @@ where
             // test to reproduce.
             //
             // use rayon::iter::{IntoParallelIterator, ParallelIterator};
-            // nodes[start..end].into_par_iter().for_each(|(_, pid)| {
-            //     state.insert(*pid, layer);
-            // });
+            // layer_assignments[start..end]
+            //     .into_par_iter()
+            //     .for_each(|(_, pid)| {
+            //         state.insert(*pid, layer);
+            //     });
             // For now use the -much slower- but correct sequential version.
-            nodes[start..end].iter().for_each(|(_, pid)| {
+            layer_assignments[start..end].iter().for_each(|(_, pid)| {
                 state.insert(*pid, layer);
             });
 
@@ -326,7 +325,7 @@ where
                 ef_search,
                 neighbors,
                 meta,
-                points,
+                storage,
             },
             out,
         )
@@ -341,17 +340,17 @@ where
     /// in the return value.
     pub fn search<'a, 'b: 'a>(
         &'b self,
-        point: &P,
+        point: &PointRef<'a>,
         search: &'a mut Search,
     ) -> impl Iterator<Item = Item<'b, P>> + ExactSizeIterator + 'a {
         search.reset();
         let map = move |candidate| Item::new(candidate, self);
-        if self.points.is_empty() {
+        if self.storage.is_empty() {
             return search.iter().map(map);
         }
 
-        search.visited.reserve_capacity(self.points.len());
-        search.push(PointId(0), point, &self.points);
+        search.visited.reserve_capacity(self.storage.len());
+        search.push(PointId(0), point, &self.storage);
         for cur in self.meta.descending() {
             let (ef, num) = match cur.is_zero() {
                 true => (self.ef_search, M * 2),
@@ -360,7 +359,7 @@ where
 
             search.ef = ef;
             let layer = self.meta.layer(cur, &self.neighbors);
-            search.search(point, layer, &self.points, num);
+            search.search(point, layer, &self.storage, num);
 
             if !cur.is_zero() {
                 search.cull();
@@ -371,8 +370,8 @@ where
     }
 
     /// Iterate over the keys and values in this index
-    pub fn iter(&self) -> impl Iterator<Item = (PointId, &P)> {
-        self.points
+    pub fn iter(&self) -> impl Iterator<Item = (PointId, PointRef<'_>)> {
+        self.storage
             .iter()
             .enumerate()
             .map(|(i, p)| (PointId(i as u32), p))
@@ -380,32 +379,37 @@ where
 
     #[doc(hidden)]
     pub fn get(&self, i: usize, search: &Search) -> Option<Item<'_, P>> {
-        Some(Item::new(search.nearest.get(i).copied()?, self))
+        Some(Item::new(search.nearest.get(i).cloned()?, self))
     }
 }
 
 pub struct Item<'a, P> {
     pub distance: f32,
     pub pid: PointId,
-    pub point: &'a P,
+    pub point: PointRef<'a>,
+    _marker: PhantomData<&'a P>,
 }
 
-impl<'a, P> Item<'a, P> {
+impl<'a, P> Item<'a, P>
+where
+    P: PointDataSource,
+{
     fn new(candidate: Candidate, hnsw: &'a Hnsw<P>) -> Self {
         Self {
             distance: candidate.distance.into_inner(),
             pid: candidate.pid,
-            point: &hnsw[candidate.pid],
+            point: hnsw.storage.get(candidate.pid.0 as usize).unwrap(),
+            _marker: PhantomData,
         }
     }
 }
 
-struct Construction<'a, P> {
+struct Construction<'a, P: PointDataSource> {
     meta: &'a Meta,
     zero: &'a [RwLock<ZeroNode<'a>>],
     upper: &'a mut [LayerSliceMut<'a>],
     pool: SearchPool,
-    points: &'a [P],
+    storage: &'a ContiguousStorage<P>,
     heuristic: Option<Heuristic>,
     ef_construction: usize,
     #[cfg(feature = "indicatif")]
@@ -416,7 +420,7 @@ struct Construction<'a, P> {
 
 impl<'a, P> Construction<'a, P>
 where
-    P: Point,
+    P: PointDataSource,
 {
     /// Insert new node in the zero layer
     ///
@@ -431,9 +435,9 @@ where
         let (mut search, mut insertion) = self.pool.pop();
         insertion.ef = self.ef_construction;
 
-        let point = &self.points[new];
+        let point_ref = &self.storage.get(new.0 as usize).unwrap();
         search.reset();
-        search.push(PointId(0), point, self.points);
+        search.push(PointId(0), point_ref, self.storage);
         let num = if layer.is_zero() { M * 2 } else { M };
 
         for cur in self.meta.descending() {
@@ -444,11 +448,11 @@ where
             };
             match cur > layer {
                 true => {
-                    search.search(point, self.upper[cur.0 - 1].as_ref(), self.points, num);
+                    search.search(point_ref, self.upper[cur.0 - 1].as_ref(), self.storage, num);
                     search.cull();
                 }
                 false => {
-                    search.search(point, self.zero, self.points, num);
+                    search.search(point_ref, self.zero, self.storage, num);
                     break;
                 }
             }
@@ -459,9 +463,12 @@ where
                 let candidates = search.select_simple();
                 &candidates[..Ord::min(candidates.len(), M * 2)]
             }
-            Some(heuristic) => {
-                search.select_heuristic(&self.points[new], self.zero, self.points, heuristic)
-            }
+            Some(heuristic) => search.select_heuristic(
+                &self.storage.get(new.0 as usize).unwrap(),
+                self.zero,
+                self.storage,
+                heuristic,
+            ),
         };
 
         // Just make sure the candidates are all unique
@@ -478,8 +485,8 @@ where
                     new,
                     self.zero.nearest_iter(pid),
                     self.zero,
-                    &self.points[pid],
-                    self.points,
+                    &self.storage.get(pid.0 as usize).unwrap(),
+                    self.storage,
                     heuristic,
                 );
 
@@ -488,7 +495,7 @@ where
                     .rewrite(found.iter().map(|candidate| candidate.pid));
             } else {
                 // Find the correct index to insert at to keep the neighbor's neighbors sorted
-                let old = &self.points[pid];
+                let old = &self.storage.get(pid.0 as usize).unwrap();
                 let idx = self.zero[pid]
                     .read()
                     .binary_search_by(|third| {
@@ -499,7 +506,9 @@ where
                             _ => return Ordering::Greater,
                         };
 
-                        distance.cmp(&old.distance(&self.points[third]).into())
+                        distance.cmp(&OrderedFloat::from(
+                            old.distance(&self.storage.get(third.0 as usize).unwrap()),
+                        ))
                     })
                     .unwrap_or_else(|e| e);
 
@@ -587,7 +596,13 @@ impl Search {
     ///
     /// Invariants: `self.nearest` should be in sorted (nearest first) order, and should be
     /// truncated to `self.ef`.
-    fn search<L: Layer, P: Point>(&mut self, point: &P, layer: L, points: &[P], links: usize) {
+    fn search<L: Layer, P: PointDataSource>(
+        &mut self,
+        point_ref: &PointRef<'_>,
+        layer: L,
+        points: &ContiguousStorage<P>,
+        links: usize,
+    ) {
         while let Some(Reverse(candidate)) = self.candidates.pop() {
             if let Some(furthest) = self.nearest.last() {
                 if candidate.distance > furthest.distance {
@@ -596,7 +611,7 @@ impl Search {
             }
 
             for pid in layer.nearest_iter(candidate.pid).take(links) {
-                self.push(pid, point, points);
+                self.push(pid, point_ref, points);
             }
 
             // If we don't truncate here, `furthest` will be further out than necessary, making
@@ -605,31 +620,31 @@ impl Search {
         }
     }
 
-    fn add_neighbor_heuristic<L: Layer, P: Point>(
+    fn add_neighbor_heuristic<L: Layer, P: PointDataSource>(
         &mut self,
         new: PointId,
         current: impl Iterator<Item = PointId>,
         layer: L,
-        point: &P,
-        points: &[P],
+        point_ref: &PointRef<'_>,
+        storage: &ContiguousStorage<P>,
         params: Heuristic,
     ) -> &[Candidate] {
         self.reset();
-        self.push(new, point, points);
+        self.push(new, point_ref, storage);
         for pid in current {
-            self.push(pid, point, points);
+            self.push(pid, point_ref, storage);
         }
-        self.select_heuristic(point, layer, points, params)
+        self.select_heuristic(point_ref, layer, storage, params)
     }
 
     /// Heuristically sort and truncate neighbors in `self.nearest`
     ///
     /// Invariant: `self.nearest` must be in sorted (nearest first) order.
-    fn select_heuristic<L: Layer, P: Point>(
+    fn select_heuristic<L: Layer, P: PointDataSource>(
         &mut self,
-        point: &P,
+        point: &PointRef<'_>,
         layer: L,
-        points: &[P],
+        storage: &ContiguousStorage<P>,
         params: Heuristic,
     ) -> &[Candidate] {
         self.working.clear();
@@ -643,8 +658,8 @@ impl Search {
                         continue;
                     }
 
-                    let other = &points[hop];
-                    let distance = OrderedFloat::from(point.distance(other));
+                    let other = storage.get(hop.0 as usize).unwrap();
+                    let distance = OrderedFloat::from(point.distance(&other));
                     let new = Candidate { distance, pid: hop };
                     self.working.push(new);
                 }
@@ -664,9 +679,10 @@ impl Search {
 
             // Disadvantage candidates which are closer to an existing result point than they
             // are to the query point, to facilitate bridging between clustered points.
-            let candidate_point = &points[candidate.pid];
+            let candidate_point = storage.get(candidate.pid.0 as usize).unwrap();
             let nearest = !self.nearest.iter().any(|result| {
-                let distance = OrderedFloat::from(candidate_point.distance(&points[result.pid]));
+                let result = storage.get(result.pid.0 as usize).unwrap();
+                let distance = OrderedFloat::from(candidate_point.distance(&result));
                 distance < candidate.distance
             });
 
@@ -693,13 +709,17 @@ impl Search {
     ///
     /// Will immediately return if the node has been considered before. This implements
     /// the inner loop from the paper's algorithm 2.
-    fn push<P: Point>(&mut self, pid: PointId, point: &P, points: &[P]) {
+    fn push<P: PointDataSource>(
+        &mut self,
+        pid: PointId,
+        point_ref: &PointRef<'_>,
+        storage: &ContiguousStorage<P>,
+    ) {
         if !self.visited.insert(pid) {
             return;
         }
-
-        let other = &points[pid];
-        let distance = OrderedFloat::from(point.distance(other));
+        let other = storage.get(pid.0 as usize).unwrap();
+        let distance = OrderedFloat::from(point_ref.distance(&other));
         let new = Candidate { distance, pid };
         let idx = match self.nearest.binary_search(&new) {
             Err(idx) if idx < self.ef => idx,
@@ -720,7 +740,7 @@ impl Search {
     /// the case because `Layer::search()` is always called right before calling `cull()`.
     fn cull(&mut self) {
         self.candidates.clear();
-        for &candidate in self.nearest.iter() {
+        for candidate in self.nearest.iter().copied() {
             self.candidates.push(Reverse(candidate));
         }
 
@@ -769,7 +789,7 @@ impl Default for Search {
     }
 }
 
-pub trait Point: Clone + Sync {
+pub trait Point: Sync {
     fn distance(&self, other: &Self) -> f32;
 }
 

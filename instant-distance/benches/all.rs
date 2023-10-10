@@ -2,7 +2,7 @@ use bencher::{benchmark_group, benchmark_main, Bencher};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use instant_distance::Builder;
+use instant_distance::{Builder, PointDataSource};
 
 benchmark_main!(benches);
 benchmark_group!(benches, build_heuristic);
@@ -13,7 +13,7 @@ fn build_heuristic(bench: &mut Bencher) {
         .map(|_| Point(rng.gen(), rng.gen()))
         .collect::<Vec<_>>();
 
-    bench.iter(|| Builder::default().seed(SEED).build_hnsw(points.clone()))
+    bench.iter(|| Builder::default().seed(SEED).build_hnsw(&points))
 }
 
 const SEED: u64 = 123456789;
@@ -49,9 +49,12 @@ fn randomized(builder: Builder) -> (u64, usize) {
 #[derive(Clone, Copy, Debug)]
 struct Point(f32, f32);
 
-impl instant_distance::Point for Point {
-    fn distance(&self, other: &Self) -> f32 {
-        // Euclidean distance metric
-        ((self.0 - other.0).powi(2) + (self.1 - other.1).powi(2)).sqrt()
+impl PointDataSource for Point {
+    fn decompose(&self) -> Vec<f32> {
+        vec![self.0, self.1]
+    }
+
+    fn stride() -> usize {
+        2
     }
 }

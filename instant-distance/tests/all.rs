@@ -4,11 +4,12 @@ use ordered_float::OrderedFloat;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
 
-use instant_distance::{Builder, Point as _, Search};
+use instant_distance::{Builder, Point as _, PointDataSource, PointRef, Search};
 
 #[test]
 #[allow(clippy::float_cmp, clippy::approx_constant)]
 fn map() {
+    // FIXME: rerun this test several times to ensure we hit the race described in Hnsw::new
     for _ in 0..10 {
         let points = (0..5)
             .map(|i| Point(i as f32, i as f32))
@@ -17,10 +18,14 @@ fn map() {
 
         let seed = ThreadRng::default().gen::<u64>();
         println!("map (seed = {seed})");
-        let map = Builder::default().seed(seed).build(points, values);
+        let map = Builder::default().seed(seed).build(&points, values);
         let mut search = Search::default();
 
-        let search_results = map.search(&Point(2.0, 2.0), &mut search);
+        let query = Point(2.0, 2.0);
+        let data = query.decompose();
+        let point_ref = PointRef::from_data(&data);
+
+        let search_results = map.search(&point_ref, &mut search);
         assert_eq!(search_results.len(), 5);
 
         for (i, item) in search_results.enumerate() {
@@ -65,16 +70,20 @@ fn randomized(builder: Builder) -> (u64, usize) {
         .collect::<Vec<_>>();
 
     let query = Point(rng.gen(), rng.gen());
+    let query = query.decompose();
+    let query = PointRef::from_data(&query);
     let mut nearest = Vec::with_capacity(256);
     for (i, p) in points.iter().enumerate() {
-        nearest.push((OrderedFloat::from(query.distance(p)), i));
+        let p = p.decompose();
+        let p = PointRef::from_data(&p);
+        nearest.push((OrderedFloat::from(query.distance(&p)), i));
         if nearest.len() >= 200 {
             nearest.sort_unstable();
             nearest.truncate(100);
         }
     }
 
-    let (hnsw, pids) = builder.seed(seed).build_hnsw(points);
+    let (hnsw, pids) = builder.seed(seed).build_hnsw(&points);
     let mut search = Search::default();
     let results = hnsw.search(&query, &mut search);
     assert!(results.len() >= 100);
@@ -95,9 +104,12 @@ fn randomized(builder: Builder) -> (u64, usize) {
 #[derive(Clone, Copy, Debug)]
 struct Point(f32, f32);
 
-impl instant_distance::Point for Point {
-    fn distance(&self, other: &Self) -> f32 {
-        // Euclidean distance metric
-        ((self.0 - other.0).powi(2) + (self.1 - other.1).powi(2)).sqrt()
+impl PointDataSource for Point {
+    fn decompose(&self) -> Vec<f32> {
+        vec![self.0, self.1]
+    }
+
+    fn stride() -> usize {
+        2
     }
 }

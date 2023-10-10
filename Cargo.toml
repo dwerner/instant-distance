@@ -3,3 +3,6 @@ members = ["instant-distance", "instant-distance-py"]
 
 [profile.bench]
 debug = true
+
+[profile.release]
+debug = true
