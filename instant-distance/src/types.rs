@@ -220,7 +220,7 @@ impl<'a> LayerSliceMut<'a> {
             .par_chunks_mut(stride)
             .zip(zero)
             .for_each(|(dst, src)| {
-                dst.copy_from_slice(&src.read()[..stride]);
+                dst.copy_from_slice(&src.read().0[..stride]);
             });
     }
 

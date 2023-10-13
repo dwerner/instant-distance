@@ -47,7 +47,7 @@ impl HnswMap {
             .map(MapValue::try_from)
             .collect::<Result<Vec<_>, PyErr>>()?;
 
-        let hsnw_map = instant_distance::Builder::from(config).build(&points, values);
+        let hsnw_map = instant_distance::Builder::from(config).build(points, values);
         Ok(Self { inner: hsnw_map })
     }
 
@@ -104,7 +104,7 @@ impl Hnsw {
             .map(FloatArray::try_from)
             .collect::<Result<Vec<_>, PyErr>>()?;
 
-        let (inner, ids) = instant_distance::Builder::from(config).build_hnsw(&points);
+        let (inner, ids) = instant_distance::Builder::from(config).build_hnsw(points);
         let ids = Vec::from_iter(ids.into_iter().map(|pid| pid.into_inner()));
         Ok((Self { inner }, ids))
     }

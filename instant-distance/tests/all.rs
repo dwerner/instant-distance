@@ -4,42 +4,84 @@ use ordered_float::OrderedFloat;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, SeedableRng};
 
-use instant_distance::{Builder, Element, Point as _, PointRef, Search};
-
+use instant_distance::{Builder, Element, Heuristic, Point as _, PointId, PointRef, Search};
 #[test]
 #[allow(clippy::float_cmp, clippy::approx_constant)]
-fn map() {
-    // FIXME: rerun this test several times to ensure we hit the race described in Hnsw::new
+fn neighbors() {
     for _ in 0..10 {
         let points = (0..5)
             .map(|i| Point([i as f32, i as f32]))
             .collect::<Vec<_>>();
         let values = vec!["zero", "one", "two", "three", "four"];
 
-        let seed = ThreadRng::default().gen::<u64>();
-        println!("map (seed = {seed})");
-        let map = Builder::default().seed(seed).build(&points, values);
+        let seed = 12345689;
+        println!("\nmap (seed = {seed})");
+        let map = Builder::default().seed(seed).build(points, values);
+
+        let values = map
+            .values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, v))
+            .collect::<Vec<_>>();
+
+        println!("values reordered {:?}", values);
+
+        for (i, _) in values.iter() {
+            let neighbors = map.neighbors(PointId::from(*i as u32)).collect::<Vec<_>>();
+            println!("neighbors of {} {:?}", i, neighbors);
+        }
+
         let mut search = Search::default();
 
-        let search_results = map.search(&Point([2.0, 2.0]), &mut search);
-        assert_eq!(search_results.len(), 5);
+        let search_results = map
+            .search(&Point([2.0, 2.0]), &mut search)
+            .map(|item| (item.distance, item.value))
+            .collect::<Vec<_>>();
 
-        for (i, item) in search_results.enumerate() {
-            match i {
-                0 => {
-                    assert_eq!(item.distance, 0.0);
-                    assert_eq!(item.value, &"two");
-                }
-                1 | 2 => {
-                    assert_eq!(item.distance, 1.4142135);
-                    assert!(item.value == &"one" || item.value == &"three");
-                }
-                3 | 4 => {
-                    assert_eq!(item.distance, 2.828427);
-                    assert!(item.value == &"zero" || item.value == &"four");
-                }
-                _ => unreachable!(),
+        println!("search results {:?}", search_results);
+
+        assert_eq!(*search_results[0].1, "two");
+        assert_eq!(*search_results[1].1, "one");
+        assert_eq!(*search_results[2].1, "three");
+        assert_eq!(*search_results[3].1, "four");
+        assert_eq!(*search_results[4].1, "zero");
+
+        assert_eq!(search_results.len(), 5);
+    }
+}
+
+#[test]
+#[allow(clippy::float_cmp, clippy::approx_constant)]
+fn map() {
+    let points = (0..5)
+        .map(|i| Point([i as f32, i as f32]))
+        .collect::<Vec<_>>();
+    let values = vec!["zero", "one", "two", "three", "four"];
+
+    let seed = ThreadRng::default().gen::<u64>();
+    println!("map (seed = {seed})");
+    let map = Builder::default().seed(seed).build(points, values);
+    let mut search = Search::default();
+
+    let search_results = map.search(&Point([2.0, 2.0]), &mut search);
+    assert_eq!(search_results.len(), 5);
+
+    for (i, item) in search_results.enumerate() {
+        match i {
+            0 => {
+                assert_eq!(item.distance, 0.0);
+                assert_eq!(item.value, &"two");
             }
+            1 | 2 => {
+                assert_eq!(item.distance, 1.4142135);
+                assert!(item.value == &"one" || item.value == &"three");
+            }
+            3 | 4 => {
+                assert_eq!(item.distance, 2.828427);
+                assert!(item.value == &"zero" || item.value == &"four");
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -77,7 +119,7 @@ fn randomized(builder: Builder) -> (u64, usize) {
         }
     }
 
-    let (hnsw, pids) = builder.seed(seed).build_hnsw(&points);
+    let (hnsw, pids) = builder.seed(seed).build_hnsw(points);
     let mut search = Search::default();
     let results = hnsw.search(&query, &mut search);
     assert!(results.len() >= 100);

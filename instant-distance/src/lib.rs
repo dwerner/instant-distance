@@ -11,6 +11,7 @@ use contiguous::ContiguousStorage;
 use indicatif::ProgressBar;
 use ordered_float::OrderedFloat;
 use parking_lot::{Mutex, RwLock};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +82,7 @@ impl Builder {
     /// Build an `HnswMap` with the given sets of points and values
     pub fn build<E: Element, P: Point<Element = E>, V: Clone>(
         self,
-        points: &[P],
+        points: Vec<P>,
         values: Vec<V>,
     ) -> HnswMap<E, P, V> {
         HnswMap::new(points, values, self)
@@ -90,7 +91,7 @@ impl Builder {
     /// Build the `Hnsw` with the given set of points
     pub fn build_hnsw<E: Element, P: Point<Element = E>>(
         self,
-        points: &[P],
+        points: Vec<P>,
     ) -> (Hnsw<E, P>, Vec<PointId>) {
         Hnsw::new(points, self)
     }
@@ -145,7 +146,7 @@ pub struct HnswMap<E: Element, P: Point<Element = E>, V> {
 }
 
 impl<'a, E: Element + 'a, P: Point<Element = E> + 'a, V: Clone> HnswMap<E, P, V> {
-    fn new(points: &[P], values: Vec<V>, builder: Builder) -> Self {
+    fn new(points: Vec<P>, values: Vec<V>, builder: Builder) -> Self {
         let (hnsw, ids) = Hnsw::new(points, builder);
 
         let mut sorted = ids.into_iter().enumerate().collect::<Vec<_>>();
@@ -187,6 +188,13 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a, V: Clone> HnswMap<E, P, V>
     pub fn get(&self, i: usize, search: &Search) -> Option<MapItem<'_, E, P, V>> {
         Some(MapItem::from(self.hnsw.get(i, search)?, self))
     }
+
+    pub fn neighbors(&self, pid: PointId) -> impl Iterator<Item = PointId> + '_ {
+        self.hnsw.neighbors[pid.0 as usize..]
+            .iter()
+            .cloned()
+            .take_while(|&pid| pid.is_valid())
+    }
 }
 
 pub struct MapItem<'a, E, P: Point<Element = E>, V> {
@@ -222,7 +230,7 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a> Hnsw<E, P> {
         Builder::default()
     }
 
-    fn new(points: &[P], builder: Builder) -> (Self, Vec<PointId>) {
+    fn new(points: Vec<P>, builder: Builder) -> (Self, Vec<PointId>) {
         let ef_search = builder.ef_search;
         let ef_construction = builder.ef_construction;
         let ml = builder.ml;
@@ -248,7 +256,8 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a> Hnsw<E, P> {
             );
         }
 
-        let mut meta = Meta::new(ml, points.len());
+        let points_len = points.len();
+        let mut meta = Meta::new(ml, points_len);
 
         // Give all points a random layer and sort the list of nodes by descending order for
         // construction. This allows us to copy higher layers to lower layers as construction
@@ -268,7 +277,7 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a> Hnsw<E, P> {
             meta: &mut meta,
             zero: zero.as_slice(),
             upper,
-            pool: SearchPool::new(points.len()),
+            pool: SearchPool::new(points_len),
             storage: &storage,
             heuristic,
             ef_construction,
@@ -285,23 +294,11 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a> Hnsw<E, P> {
             }
 
             let Range { start, end } = state.meta.points(layer);
-
-            // FIXME:
-            // There is some sort of race here where neighbors is missing nodes.
-            // This is sporadic, but worth noting that it happens. Uncomment
-            // this code (and comment out the sequential version), run the `map`
-            // test to reproduce.
-            //
-            // use rayon::iter::{IntoParallelIterator, ParallelIterator};
-            // layer_assignments[start..end]
-            //     .into_par_iter()
-            //     .for_each(|(_, pid)| {
-            //         state.insert(*pid, layer);
-            //     });
-            // For now use the -much slower- but correct sequential version.
-            layer_assignments[start..end].iter().for_each(|(_, pid)| {
-                state.insert(*pid, layer);
-            });
+            layer_assignments[start..end]
+                .into_par_iter()
+                .for_each(|(_, pid)| {
+                    state.insert(*pid, layer);
+                });
 
             // Copy the current state of the zero layer
             match layer.0 {
@@ -327,12 +324,6 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a> Hnsw<E, P> {
     }
 
     /// Search the index for the points nearest to the reference point `point`
-    ///
-    /// TODO: outdated comment!
-    ///
-    /// The results are returned in the `out` parameter; the number of neighbors to search for
-    /// is limited by the size of the `out` parameter, and the number of results found is returned
-    /// in the return value.
     pub fn search(
         &'a self,
         point: &PointRef<'a, E, P>,
@@ -340,7 +331,6 @@ impl<'a, E: Element + 'a, P: Point<Element = E> + 'a> Hnsw<E, P> {
     ) -> impl Iterator<Item = Item<'a, E, P>> + ExactSizeIterator + 'a {
         search.reset();
         let map = move |candidate| Item::new(candidate, self);
-        // if <ContiguousStorage<P> as Storage<P>>::is_empty(&self.storage) {
         if self.storage.is_empty() {
             return search.iter().map(map);
         }
@@ -468,40 +458,44 @@ impl<'a, E: Element, P: Point<Element = E>> Construction<'a, E, P> {
         for (i, candidate) in found.iter().enumerate() {
             // `candidate` here is the new node's neighbor
             let &Candidate { distance, pid } = candidate;
-            if let Some(heuristic) = self.heuristic {
-                let found = insertion.add_neighbor_heuristic(
-                    new,
-                    self.zero.nearest_iter(pid),
-                    self.zero,
-                    &self.storage.get(pid.0 as usize).unwrap(),
-                    self.storage,
-                    heuristic,
-                );
 
-                self.zero[pid]
-                    .write()
-                    .rewrite(found.iter().map(|candidate| candidate.pid));
-            } else {
-                // Find the correct index to insert at to keep the neighbor's neighbors sorted
-                let old = &self.storage.get(pid.0 as usize).unwrap();
-                let idx = self.zero[pid]
-                    .read()
-                    .binary_search_by(|third| {
-                        // `third` here is one of the neighbors of the new node's neighbor.
-                        let third = match third {
-                            pid if pid.is_valid() => *pid,
-                            // if `third` is `None`, our new `node` is always "closer"
-                            _ => return Ordering::Greater,
-                        };
+            // Keeping this for the moment as I'm unsure if it's really needed
+            // if let Some(heuristic) = self.heuristic {
+            //     let found = insertion.add_neighbor_heuristic(
+            //         new,
+            //         self.zero.nearest_iter(pid),
+            //         self.zero,
+            //         &self.storage.get(pid.0 as usize).unwrap(),
+            //         self.storage,
+            //         heuristic,
+            //     );
+            //     self.zero[pid]
+            //         .write()
+            //         .rewrite(found.iter().map(|candidate| candidate.pid));
+            // } else {
 
-                        distance.cmp(&OrderedFloat::from(
-                            old.distance(&self.storage.get(third.0 as usize).unwrap()),
-                        ))
-                    })
-                    .unwrap_or_else(|e| e);
+            // Find the correct index to insert at to keep the neighbor's neighbors sorted
+            let old = &self.storage.get(pid.0 as usize).unwrap();
+            let idx = self.zero[pid]
+                .read()
+                .0
+                .binary_search_by(|third| {
+                    // `third` here is one of the neighbors of the new node's neighbor.
+                    let third = match third {
+                        pid if pid.is_valid() => *pid,
+                        // if `third` is `None`, our new `node` is always "closer"
+                        _ => return Ordering::Greater,
+                    };
 
-                self.zero[pid].write().insert(idx, new);
-            }
+                    distance.cmp(&OrderedFloat::from(
+                        old.distance(&self.storage.get(third.0 as usize).unwrap()),
+                    ))
+                })
+                .unwrap_or_else(|e| e);
+
+            self.zero[pid].write().insert(idx, new);
+            // }
+
             node.set(i, pid);
         }
 

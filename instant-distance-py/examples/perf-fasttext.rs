@@ -58,9 +58,7 @@ fn main() -> Result<(), anyhow::Error> {
     let num_queries = opt.num_queries;
     let points = points.clone();
     let start = Instant::now();
-    let hnswmap = Builder::default()
-        .seed(opt.seed)
-        .build::<f32, FloatArray, _>(&points, words);
+    let hnswmap = Builder::default().seed(opt.seed).build(points, words);
     println!("contiguous indexing took {:?}", start.elapsed());
 
     if wait {
